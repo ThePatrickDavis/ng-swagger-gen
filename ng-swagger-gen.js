@@ -349,7 +349,27 @@ function simpleRef(ref) {
     return ref;
   }
 }
+function splitGeneric(name) {
+  if(!name) {
+    return null;
+  }
+  var result = null;;
+  var startBracket = name.indexOf('[');
+  var endBracket = name.lastIndexOf(']');
+  if(startBracket > 0 && endBracket > (startBracket + 2)) {
+    result = {};
+    result.generic = name.substr(0, startBracket);
+    if(result.generic === 'ICollection') {
+      result.generic = 'Array';
+    }
+    result.type = name.substr(startBracket + 1, endBracket - startBracket - 1);
+    if(result.type === 'Guid') {
+      result.type = 'string';
+    }
+  }
 
+  return result;
+}
 /**
  * Converts a given enum value into the enum name
  */
@@ -402,6 +422,21 @@ function DependenciesResolver(models, ownType) {
  * Adds a candidate dependency
  */
 DependenciesResolver.prototype.add = function(dep) {
+  var genericObj = splitGeneric(dep);
+  while(genericObj) {
+    dep = genericObj.generic;
+    if (this.dependencyNames.indexOf(dep) < 0 && dep !== this.ownType) {
+      var depModel = this.models[dep];
+      if (depModel) {
+        this.dependencies.push(depModel);
+        this.dependencyNames.push(dep);
+      }
+    }
+
+    dep = genericObj.type;
+    genericObj = splitGeneric(dep);
+  }
+  
   dep = removeBrackets(dep);
   if (this.dependencyNames.indexOf(dep) < 0 && dep !== this.ownType) {
     var depModel = this.models[dep];
@@ -410,6 +445,7 @@ DependenciesResolver.prototype.add = function(dep) {
       this.dependencyNames.push(dep);
     }
   }
+  
 };
 /**
  * Returns the resolved dependencies as a list of models
@@ -423,10 +459,11 @@ DependenciesResolver.prototype.get = function() {
  * are simplified descriptors for models.
  */
 function processModels(swagger, options) {
-  var name, model, i, property;
+  var name, model, i, property, hasGeneric;
   var models = {};
   for (name in swagger.definitions) {
     model = swagger.definitions[name];
+
     var parent = null;
     var properties = null;
     var requiredProperties = null;
@@ -495,8 +532,32 @@ function processModels(swagger, options) {
         ].propertyIsLast = true;
       }
     }
+    var startBracket = name.indexOf('[');
+    var endBracket = name.lastIndexOf(']');
+    if(startBracket > 0 && endBracket > 0 && endBracket - startBracket > 0) {
+      var genericName = name.substr(0, startBracket);
+      var typeName = name.substr(startBracket + 1, endBracket - startBracket - 1);
+        if(!models[genericName]) {
+          var genericObject = Object.assign({}, descriptor);
+          genericObject.modelClassWithType = genericName + '<T>';
+          genericObject.modelClass = genericName;
+          genericObject.modelFile = toFileName(genericName);
+          genericObject.modelName = genericName;
+          if(genericObject.properties && genericObject.properties['Data']) {
+            genericObject.properties['Data'].propertyType = 'T';
+          }
 
-    models[name] = descriptor;
+          models[genericName] = genericObject;
+        }
+      } else {
+        descriptor.modelClassWithType = descriptor.modelClass;
+        models[name] = descriptor;
+      }
+    
+      
+    
+
+    
   }
 
   // Now that we know all models, process the hierarchies
@@ -603,6 +664,8 @@ function propertyType(property) {
     return type.length == 0 ? 'void' : type;
   }
   switch (property.type) {
+    case 'Guid':
+      return 'string';
     case 'string':
       if (property.enum && property.enum.length > 0) {
         return '\'' + property.enum.join('\' | \'') + '\'';
@@ -820,6 +883,16 @@ function operationId(given, method, url, allKnown) {
   return id;
 }
 
+function convertToGeneric(param) {
+  var genericObj = splitGeneric(param);
+
+  if(genericObj) {
+    return genericObj.generic + '<' + convertToGeneric(genericObj.type) + '>';
+  } else {
+    return param;
+  }
+}
+
 /**
  * Process API paths, returning an object with descriptors keyed by tag name.
  * It is required that operations define a single tag, or they are ignored.
@@ -956,11 +1029,12 @@ function processServices(swagger, models, options) {
         operationMethod: method.toLocaleUpperCase(),
         operationPath: url,
         operationPathExpression: toPathExpression(paramsClass, url),
-        operationResultType: resultType,
+        operationResultType: convertToGeneric(resultType),
         operationComments: toComments(docString, 1),
         operationParameters: operationParameters,
         operationResponses: operationResponses,
       };
+
       var modelResult = models[removeBrackets(resultType)];
       var actualType = resultType;
       if (modelResult && modelResult.modelIsSimple) {
